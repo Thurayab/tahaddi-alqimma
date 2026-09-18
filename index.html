@@ -441,46 +441,61 @@ const DEFAULT_TOPICS = [
 const TOPIC_COLORS = {teal:"var(--teal)", gold:"var(--gold)", pink:"var(--pink)", purple:"var(--purple)", blue:"var(--blue)", orange:"var(--orange)"};
 const ADMIN_PASSWORD = "1470";
 
-/* ================== STORAGE HELPERS ================== */
-async function safeGet(key, shared){
-  try{ const r = await window.storage.get(key, shared); return r ? r.value : null; }
-  catch(e){ return null; }
+/* ================== STORAGE HELPERS (Firebase Realtime Database) ================== */
+const DB_URL = "https://tahaddi-alqimma-default-rtdb.firebaseio.com";
+
+function fbSeg(s){
+  return encodeURIComponent(String(s))
+    .replace(/\./g, "%2E").replace(/#/g, "%23")
+    .replace(/\$/g, "%24").replace(/\[/g, "%5B").replace(/\]/g, "%5D");
 }
-async function safeSet(key, value, shared){
-  try{ await window.storage.set(key, value, shared); return true; }
-  catch(e){ return false; }
+async function fbGet(path){
+  try{
+    const res = await fetch(DB_URL + "/" + path + ".json");
+    if(!res.ok) return null;
+    return await res.json();
+  }catch(e){ return null; }
 }
-async function safeList(prefix, shared){
-  try{ const r = await window.storage.list(prefix, shared); return r ? r.keys : []; }
-  catch(e){ return []; }
+async function fbSet(path, value){
+  try{
+    const res = await fetch(DB_URL + "/" + path + ".json", {
+      method:"PUT",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify(value)
+    });
+    return res.ok;
+  }catch(e){ return false; }
+}
+async function fbDelete(path){
+  try{
+    const res = await fetch(DB_URL + "/" + path + ".json", { method:"DELETE" });
+    return res.ok;
+  }catch(e){ return false; }
 }
 
 async function loadTopics(){
-  const raw = await safeGet("topics-v2", true);
-  if(raw){ try{ return JSON.parse(raw); }catch(e){} }
-  await safeSet("topics-v2", JSON.stringify(DEFAULT_TOPICS), true);
+  const raw = await fbGet("topics");
+  if(raw && Array.isArray(raw) && raw.length){ return raw; }
+  await fbSet("topics", DEFAULT_TOPICS);
   return JSON.parse(JSON.stringify(DEFAULT_TOPICS));
 }
-async function saveTopics(topics){ await safeSet("topics-v2", JSON.stringify(topics), true); }
+async function saveTopics(topics){ await fbSet("topics", topics); }
 
-function studentKey(cls, name){ return "student:" + cls + ":" + encodeURIComponent(name); }
+function studentPath(cls, name){ return "students/" + fbSeg(cls) + "/" + fbSeg(name); }
 
 async function loadStudent(cls, name){
-  const raw = await safeGet(studentKey(cls,name), true);
-  if(raw){ try{ return JSON.parse(raw); }catch(e){} }
+  const raw = await fbGet(studentPath(cls,name));
+  if(raw){ return raw; }
   const fresh = { name, cls, topicScores:{}, completed:[], joined:Date.now() };
-  await safeSet(studentKey(cls,name), JSON.stringify(fresh), true);
+  await fbSet(studentPath(cls,name), fresh);
   return fresh;
 }
-async function saveStudent(st){ await safeSet(studentKey(st.cls, st.name), JSON.stringify(st), true); }
+async function saveStudent(st){ await fbSet(studentPath(st.cls, st.name), st); }
 
 async function loadClassStudents(cls){
-  const keys = await safeList("student:" + cls + ":", true);
-  const out = [];
-  for(const k of keys){
-    const raw = await safeGet(k, true);
-    if(raw){ try{ out.push(JSON.parse(raw)); }catch(e){} }
-  }
+  const data = await fbGet("students/" + fbSeg(cls));
+  if(!data) return [];
+  const out = Object.values(data);
   out.sort((a,b)=> totalScore(b) - totalScore(a));
   return out;
 }
@@ -488,7 +503,19 @@ function totalScore(st){
   return Object.values(st.topicScores||{}).reduce((s,v)=>s+v,0);
 }
 async function deleteStudent(cls, name){
-  try{ await window.storage.delete(studentKey(cls,name), true); }catch(e){}
+  await fbDelete(studentPath(cls,name));
+}
+
+/* ---- local per-device session (remember who's logged in on this device) ---- */
+function getSession(){
+  try{ const raw = localStorage.getItem("tahaddi_session"); return raw ? JSON.parse(raw) : null; }
+  catch(e){ return null; }
+}
+function setSession(sess){
+  try{
+    if(sess) localStorage.setItem("tahaddi_session", JSON.stringify(sess));
+    else localStorage.removeItem("tahaddi_session");
+  }catch(e){}
 }
 
 /* ================== APP STATE ================== */
@@ -503,17 +530,12 @@ let STATE = {
 
 async function boot(){
   STATE.topics = await loadTopics();
-  const sessRaw = await safeGet("session", false);
-  if(sessRaw){
-    try{
-      const sess = JSON.parse(sessRaw);
-      if(sess && sess.cls && sess.name){
-        STATE.cls = sess.cls; STATE.name = sess.name;
-        STATE.student = await loadStudent(sess.cls, sess.name);
-        STATE.screen = "dashboard";
-        render(); return;
-      }
-    }catch(e){}
+  const sess = getSession();
+  if(sess && sess.cls && sess.name){
+    STATE.cls = sess.cls; STATE.name = sess.name;
+    STATE.student = await loadStudent(sess.cls, sess.name);
+    STATE.screen = "dashboard";
+    render(); return;
   }
   STATE.screen = "login";
   render();
@@ -575,13 +597,13 @@ async function startSession(){
   if(!pendingClass){ showToast("اختاري الفصل أولاً"); return; }
   if(!name){ showToast("اكتبي اسمكِ أولاً"); return; }
   STATE.cls = pendingClass; STATE.name = name;
-  await safeSet("session", JSON.stringify({cls:pendingClass, name}), false);
+  setSession({cls:pendingClass, name});
   STATE.student = await loadStudent(pendingClass, name);
   STATE.screen = "dashboard";
   render();
 }
 function logout(){
-  safeSet("session", "", false);
+  setSession(null);
   pendingClass = null; pendingNameVal = "";
   STATE.cls = null; STATE.name = null; STATE.student = null;
   STATE.screen = "login"; render();
@@ -930,4 +952,3 @@ boot();
 </script>
 </body>
 </html>
-
